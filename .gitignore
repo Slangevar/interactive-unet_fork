@@ -1,0 +1,28 @@
+# Python virtual environment
+.venv/
+
+# Data and model directories (often contain large or generated files)
+data/
+model/
+
+# Python package build info
+interactive_unet.egg-info/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode and PyCharm project files (optional, but common)
+.vscode/
+.idea/
+
+# System files (optional)
+.DS_Store
+Thumbs.db
+
+# DO NOT ignore the .git directory! 
+# .git/  <-- Do NOT add this line.
