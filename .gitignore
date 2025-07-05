@@ -12,6 +12,7 @@ interactive_unet.egg-info/
 __pycache__/
 *.py[cod]
 *$py.class
+interactive_unet/test.py
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
