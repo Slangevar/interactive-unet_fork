@@ -6,6 +6,7 @@ import pickle
 import asyncio
 import threading
 import numpy as np
+import json
 from PIL import Image
 from skimage import io
 from pathlib import Path
@@ -60,7 +61,7 @@ sampling_mode = "random"
 sampling_axis = "x"
 
 # UI/Canvas parameters
-canvas_size = 700
+canvas_size = 650
 annotator = Annotator(canvas_size)
 
 training = False
@@ -70,6 +71,8 @@ suggesting = False
 interacting = False
 updated = True
 last_interaction = time.time()
+
+ui.add_head_html("<style>body { zoom: 1.00; }</style>", shared=True)
 
 ui.add_body_html(
     """
@@ -131,7 +134,7 @@ ui.add_body_html(
 
 
 def randomize():
-    global annotator, dataset, volume_index, image_slice
+    global dataset, volume_index, image_slice
 
     if len(dataset) == 0:
         # Create blank slice if no volumes are provided
@@ -148,28 +151,59 @@ def randomize():
             .astype("uint8")
         )
 
-    annotator.set_image(np.repeat(image_slice[:, :, None], 3, axis=2))
-
-    # --- new block starts here ---
-    # grab the current rot_vec from the slicer
-    volume_name = dataset[volume_index].filename
-    origin = dataset[volume_index].slicer.origin
-    rot = np.round(dataset[volume_index].slicer.rot_vec, 2)
-    # update the UI label
-    ui_volume_name_label.set_text(f"Volume: {volume_name}")
-    ui_origin_label.set_content(
-        f"Origin: ({origin[2]:.0f}, {origin[1]:.0f}, {origin[0]:.0f})"
-    )
-    ui_rotation_label.set_content(f"Rotation vector: {rot.tolist()}")
-    # --- new block ends here ---
-
-    ui_volume_picker.set_value(dataset[volume_index].filename)
+    update_annotator_info()
 
     clear()
 
 
+@ui.refreshable
+def origin_section():
+    global ui_input_origin_x, ui_input_origin_y, ui_input_origin_z, nx, ny, nz
+
+    nz, ny, nx = dataset[volume_index].image_volume.shape  # shape of the volume
+
+    ui.markdown("**Origin of the Slice**").classes("w-full")
+    with ui.column().classes("gap-2 w-full p-0"):
+        ui_input_origin_x = (
+            ui.number(
+                "X",
+                placeholder=f"1~{int(nx)-1}",
+                # value=ox,
+                min=1,
+                max=int(nx) - 1,
+                step=1,
+            )
+            .props("dense clearable")
+            .classes("w-full")
+        )
+        ui_input_origin_y = (
+            ui.number(
+                "Y",
+                placeholder=f"1~{int(ny)-1}",
+                # value=oy,
+                min=1,
+                max=int(ny) - 1,
+                step=1,
+            )
+            .props("dense clearable")
+            .classes("w-full")
+        )
+        ui_input_origin_z = (
+            ui.number(
+                "Z",
+                placeholder=f"1~{int(nz)-1}",
+                # value=oz,
+                min=1,
+                max=int(nz) - 1,
+                step=1,
+            )
+            .props("dense clearable")
+            .classes("w-full")
+        )
+
+
 def update_custom_slice():
-    global nx, ny, nz
+    global nx, ny, nz, image_slice
     # 0) Safeguard
     raw_origin = [
         ui_input_origin_x.value,
@@ -183,7 +217,9 @@ def update_custom_slice():
     ]
     if any(v is None or str(v).strip() == "" for v in raw_origin + raw_rot):
         ui.notify(
-            "Please fill in all origin and rotation‐vector fields", color="negative"
+            "Please fill in all origin and rotation‐vector fields",
+            color="negative",
+            timeout=1000,
         )
         return
 
@@ -223,29 +259,135 @@ def update_custom_slice():
     slicer.update_orientation_vectors(normal)
 
     # 4) Now *reuse* get_slice to pull out the plane along axis=0
-    slice2d = (
+    image_slice = (
         dataset[volume_index].get_slice(slice_width=input_size, order=1).astype("uint8")
     )
 
     # 5) Display it & update your rotation label
-    annotator.set_image(np.repeat(slice2d[:, :, None], 3, axis=2))
+    update_annotator_info()
 
-    # --- new block starts here ---
-    # grab the current rot_vec from the slicer
-    volume_name = dataset[volume_index].filename
-    origin = dataset[volume_index].slicer.origin
-    rot = np.round(dataset[volume_index].slicer.rot_vec, 2)
-    # update the UI label
-    ui_volume_name_label.set_text(f"Volume: {volume_name}")
-    ui_origin_label.set_content(
-        f"Origin: ({origin[2]:.0f}, {origin[1]:.0f}, {origin[0]:.0f})"
+    ui.notify(
+        "Custom slice applied",
+        color="positive",
+        timeout=1000,
     )
-    ui_rotation_label.set_content(f"Rotation vector: {rot.tolist()}")
-    # --- new block ends here ---
-
-    ui.notify("Custom slice applied", color="positive")
 
     clear()
+
+
+@ui.refreshable
+def replicate_section():
+    # print("▶ replicate_section running, mode =", ui_select_sampling_mode.value)
+    # only show when mode == "Replicate"
+    if ui_select_sampling_mode.value != "Replicate":
+        return
+
+    ui.markdown("**Choose a configuration to replicate**").classes("w-full")
+
+    config_files = sorted(glob.glob("data/train/configs/*.json"))
+    if not config_files:
+        ui.markdown("_No saved configs yet_").classes("italic text-gray-500")
+    else:
+        # Adjust the height of the replicate section
+        with ui.element("div").style("max-height:300px;overflow-y:auto;"):
+            with ui.list().props("bordered separator").classes("w-full"):
+                for path in config_files:
+                    name = os.path.basename(path)  # e.g. 'slice_0005.json'
+                    idx = name.split(".")[0]
+                    done = os.path.exists(f"data/train/images/{idx}.tiff")
+
+                    with ui.item(on_click=lambda _, n=idx: load_replicate_config(n)):
+                        with ui.item_section().props("avatar"):
+                            # OPTION 1 ─ use the stock Material Icons
+                            ui.icon(
+                                "check_circle" if done else "radio_button_unchecked"
+                            ).props(f'color={"green" if done else "gray"}')
+
+                        with ui.item_section():
+                            ui.item_label(idx)
+
+
+def load_replicate_config(idx):
+    global nx, ny, nz, image_slice, input_size, slice_idx
+
+    slice_idx = int(idx)
+    cfg_path = f"data/train/configs/{idx}.json"
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+
+    # 1) Switch to the right volume
+    ui_volume_picker.set_value(cfg["Volume"])
+    # 2) Update the slicer state
+    input_size = cfg["InputSize"]
+    slicer = dataset[volume_index].slicer
+    slicer.origin = np.array(cfg["Origin"], dtype=float)
+
+    slicer.update_orientation_vectors(np.array(cfg["RotationVector"], dtype=float))
+
+    # 3) Now *reuse* get_slice to pull out the plane along axis=0
+    image_slice = (
+        dataset[volume_index].get_slice(slice_width=input_size, order=1).astype("uint8")
+    )
+
+    # 4) Update the UI labels
+    update_annotator_info()
+    ui.notify(
+        "Slice from configuration extracted",
+        color="positive",
+        timeout=1000,
+    )
+
+    clear()
+
+
+def save_annotation():
+    global annotator, dataset, train_samples, color_idx, image_slice, slice_idx
+
+    if (len(train_samples) == 0) and (annotator.get_num_unique_colors() != num_classes):
+        ui.notify(
+            f"The first image in the dataset must contain at least one annotation for each class."
+            f"The number of classes is set to {num_classes} and only {annotator.get_num_unique_colors()} classes annotated."
+        )
+    else:
+        mask_slice = annotator.mask
+        slice_data = {
+            "volume": dataset[volume_index].filename,
+            "slicer": dataset[volume_index].slicer.to_dict(),
+        }
+
+        if not ui_select_sampling_mode.value == "Replicate":
+            slice_idx = None
+
+        utils.save_sample(
+            image_slice,
+            mask_slice,
+            slice_data,
+            num_classes,
+            slice_idx,
+        )
+
+        train_samples = glob.glob("data/train/images/*.tiff")
+
+        ui_select_input_size.disable()
+        ui_select_num_classes.disable()
+
+        if (
+            ui_select_sampling_mode.value == "Random"
+            or ui_select_sampling_mode.value == "Axially-aligned"
+        ):
+            randomize()
+
+        if ui_select_sampling_mode.value == "Replicate":
+            replicate_section.refresh()
+
+        ui.notify(
+            f"Annotation saved successfully!",
+            color="positive",
+            position="top",
+            timeout=1000,
+        )
+
+        clear()
 
 
 def redraw_check():
@@ -363,13 +505,13 @@ def key_handler(e: KeyEventArguments):
         if e.key == "c":
             color_idx += 1
             if color_idx == num_classes:
-                color_idx = 1
+                color_idx = 0
             redraw_overlay()
 
         # Previous class/color
         if e.key == "v":
             color_idx -= 1
-            if color_idx == 0:
+            if color_idx < 0:
                 color_idx = num_classes - 1
             redraw_overlay()
 
@@ -391,28 +533,7 @@ def key_handler(e: KeyEventArguments):
             redraw()
 
         if e.key == "s":
-            if (len(train_samples) == 0) and (
-                annotator.get_num_unique_colors() != num_classes
-            ):
-                ui.notify(
-                    f"The first image in the dataset must contain at least one annotation for each class."
-                    f"The number of classes is set to {num_classes} and only {annotator.get_num_unique_colors()} classes annotated."
-                )
-            else:
-                mask_slice = annotator.mask
-                slice_data = {
-                    "volume": dataset[volume_index].filename,
-                    "slicer": dataset[volume_index].slicer.to_dict(),
-                }
-                utils.save_sample(image_slice, mask_slice, slice_data, num_classes)
-
-                train_samples = glob.glob("data/train/images/*.tiff")
-
-                ui_select_input_size.disable()
-                ui_select_num_classes.disable()
-
-                randomize()
-                clear()
+            save_annotation()
 
 
 def mouse_handler(e: events.MouseEventArguments):
@@ -490,7 +611,7 @@ def mouse_handler(e: events.MouseEventArguments):
             ii.is_drawing = False
             annotator.apply_current_path()
             redraw()
-            run_suggestor()
+            # run_suggestor() # comment out since suggestor is now our main focus now.
 
     ii.x = e.image_x
     ii.y = e.image_y
@@ -507,11 +628,11 @@ def mouse_wheel_handler(e: KeyEventArguments):
         delta_y = e.args["deltaY"]
 
         if delta_y < 0:
-            ii.brush_size = ii.brush_size * 1.1
+            ii.brush_size = min(ii.brush_size * 1.033, canvas_size - 1)
             redraw_overlay()
 
         elif delta_y > 0:
-            ii.brush_size = ii.brush_size * (1 / 1.1)
+            ii.brush_size = max(5.0, ii.brush_size * (1 / 1.033))
             redraw_overlay()
 
     # Zoom in and out
@@ -555,12 +676,33 @@ def update_overlay_opacity(e):
 
 def update_display_info():
     if ii.overlay_opacity == 0:
-        ui_display_info.set_content("No overlay displayed??")
+        ui_display_info.set_content("No overlay displayed")
     else:
         if ii.overlay == "live_suggestions":
             ui_display_info.set_content("Displaying live suggestions")
         elif ii.overlay == "model_predictions":
             ui_display_info.set_content("Displaying model predictions")
+
+
+def update_annotator_info():
+    global annotator, dataset
+
+    annotator.set_image(np.repeat(image_slice[:, :, None], 3, axis=2))
+
+    # --- new block starts here ---
+    # grab the current rot_vec from the slicer
+    volume_name = dataset[volume_index].filename
+    origin = dataset[volume_index].slicer.origin
+    rot = np.round(dataset[volume_index].slicer.rot_vec, 2)
+    # update the UI label
+    ui_volume_name_label.set_text(f"Volume: {volume_name}")
+    ui_origin_label.set_text(
+        f"Origin: ({origin[0]:.0f}, {origin[1]:.0f}, {origin[2]:.0f})"
+    )
+    ui_rotation_label.set_text(f"Rotation vector: {rot.tolist()}")
+    # --- new block ends here ---
+
+    ui_volume_picker.set_value(dataset[volume_index].filename)
 
 
 def cycle_overlay():
@@ -605,9 +747,16 @@ def update_input_size(e):
 
 def update_sampling_mode(e):
     global sampling_mode
-    if ui_select_sampling_mode.value == "Custom":
+    ui.notify(
+        f"Sampling mode set to {ui_select_sampling_mode.value}",
+        color="positive",
+        position="top",
+        timeout=1000,
+    )
+    if ui_select_sampling_mode.value == "Replicate":
+        replicate_section.refresh()
+    elif ui_select_sampling_mode.value == "Custom":
         pass
-        # sampling_mode = "custom"
     else:
         if ui_select_sampling_mode.value == "Random":
             sampling_mode = "random"
@@ -630,14 +779,13 @@ def update_sampling_axis(e):
 
 
 def update_volume(e):
-    global volume_index, ox, oy, oz, nx, ny, nz
+    global volume_index
     # find which dataset entry matches the selected filename
     filenames = [d.filename for d in dataset]
-    volume_index = filenames.index(ui_volume_picker.value)
-    origin_section.refresh()
+    if ui_volume_picker.value is not None:
+        volume_index = filenames.index(ui_volume_picker.value)
 
-    nz, ny, nx = dataset[volume_index].image_volume.shape  # shape of the volume
-    ox, oy, oz = nx // 2, ny // 2, nz // 2  # default origin in the middle
+    origin_section.refresh()
 
 
 def update_training_plot():
@@ -897,13 +1045,35 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                     with ui.element("div").classes("justify-center"):
                         ui_sample_count = ui.markdown(f"Samples: {len(train_samples)}")
 
+                with ui.column(align_items="center").classes(
+                    "bg-gray-100 w-full q-py-sm"
+                ).style("gap:2px"):
+                    # Row 1
+                    ui_volume_name_label = ui.label(
+                        f"Current Volume: {dataset[volume_index].filename}"
+                    ).classes("q-my-0 text-center")
+
+                    # Row 2
+                    ui_origin_label = ui.label(
+                        f"Origin: ("
+                        f"{dataset[volume_index].slicer.origin[0]:.0f}, "
+                        f"{dataset[volume_index].slicer.origin[1]:.0f}, "
+                        f"{dataset[volume_index].slicer.origin[2]:.0f}"
+                        f")"
+                    ).classes("q-my-0 text-center")
+
+                    # Row 3
+                    ui_rotation_label = ui.label(
+                        f"Rotation: {np.round(dataset[volume_index].slicer.rot_vec, 2).tolist()}"
+                    ).classes("q-my-0 text-center")
+
                 with ui.row(align_items="center").classes(
                     "w-full justify-center no-wrap"
                 ):
 
                     ui_select_input_size = (
                         ui.select(
-                            [128, 256, 384, 512, 1024],
+                            [128, 256, 384, 512, 768],
                             value=input_size,
                             label="Input Size",
                             on_change=update_input_size,
@@ -1038,11 +1208,7 @@ with ui.column(align_items="center").classes("w-full justify-center"):
 
                     ui_select_sampling_mode = (
                         ui.select(
-                            [
-                                "Random",
-                                "Axially-aligned",
-                                "Custom",
-                            ],
+                            ["Random", "Axially-aligned", "Custom", "Replicate"],
                             value="Random",
                             label="Sampling mode",
                             on_change=update_sampling_mode,
@@ -1066,6 +1232,21 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                         backward=lambda v: v == "Axially-aligned",
                     )
 
+                    ui_resample_button = (
+                        ui.button(
+                            "Resample",
+                            on_click=randomize,
+                        )
+                        .props("filled")
+                        .classes("w-full")
+                    )
+
+                    ui_resample_button.bind_visibility_from(
+                        ui_select_sampling_mode,
+                        "value",
+                        backward=lambda v: v in ["Random", "Axially-aligned"],
+                    )
+
                     # ─── Custom mode block ───
                     with ui.column().bind_visibility_from(
                         ui_select_sampling_mode,
@@ -1085,60 +1266,7 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                             .classes("w-full")
                         )
 
-                        # 2. A refreshable container for the origin controls
-                        @ui.refreshable
-                        def origin_section():
-                            global ui_input_origin_x, ui_input_origin_y, ui_input_origin_z, nx, ny, nz, ox, oy, oz
-                            # Determine current volume shape
-                            nz, ny, nx = dataset[
-                                volume_index
-                            ].image_volume.shape  # shape of the volume
-                            ox, oy, oz = (
-                                nx // 2,
-                                ny // 2,
-                                nz // 2,
-                            )  # default origin in the middle
-
-                            ui.markdown("**Origin of the Slice**").classes("w-full")
-                            with ui.column().classes("gap-2 w-full p-0"):
-                                ui_input_origin_x = (
-                                    ui.number(
-                                        "X",
-                                        placeholder=f"1~{int(nx)-1}",
-                                        value=ox,
-                                        min=1,
-                                        max=int(nx) - 1,
-                                        step=1,
-                                    )
-                                    .props("dense clearable")
-                                    .classes("w-full")
-                                )
-                                ui_input_origin_y = (
-                                    ui.number(
-                                        "Y",
-                                        placeholder=f"1~{int(ny)-1}",
-                                        value=oy,
-                                        min=1,
-                                        max=int(ny) - 1,
-                                        step=1,
-                                    )
-                                    .props("dense clearable")
-                                    .classes("w-full")
-                                )
-                                ui_input_origin_z = (
-                                    ui.number(
-                                        "Z",
-                                        placeholder=f"1~{int(nz)-1}",
-                                        value=oz,
-                                        min=1,
-                                        max=int(nz) - 1,
-                                        step=1,
-                                    )
-                                    .props("dense clearable")
-                                    .classes("w-full")
-                                )
-
-                        # 3. Initially build the section
+                        # Initially build the section
                         origin_section()
 
                         # Rotation Vector label row
@@ -1151,7 +1279,7 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                                 ui.number(
                                     label="X",
                                     placeholder="X of the rotation vector",
-                                    value=1,
+                                    # value=rvx,
                                     step=0.01,
                                 )
                                 .props("dense clearable")
@@ -1162,7 +1290,7 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                                 ui.number(
                                     label="Y",
                                     placeholder="Y of the rotation vector",
-                                    value=0,
+                                    # value=rvy,
                                     step=0.01,
                                 )
                                 .props("dense clearable")
@@ -1173,7 +1301,7 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                                 ui.number(
                                     label="Z",
                                     placeholder="Z of the rotation vector",
-                                    value=0,
+                                    # value=rvz,
                                     step=0.01,
                                 )
                                 .props("dense clearable")
@@ -1184,6 +1312,16 @@ with ui.column(align_items="center").classes("w-full justify-center"):
                         ui.button(
                             "Apply Custom Slice", on_click=update_custom_slice
                         ).props("filled").classes("w-full")
+                    # ────────────────────────────
+
+                    # ─── Replicate mode block ───
+                    with ui.column().bind_visibility_from(
+                        ui_select_sampling_mode,
+                        "value",
+                        backward=lambda v: v == "Replicate",
+                    ).classes("gap-2 w-full p-2"):
+
+                        replicate_section()
                 # ────────────────────────────
 
                 with ui.expansion(text="Display settings").props("dense").classes(
@@ -1252,28 +1390,31 @@ with ui.column(align_items="center").classes("w-full justify-center"):
             ):
                 with ui.element("div").classes("justify-center"):
                     ui_display_info = ui.markdown(f"No overlay displayed")
-                    ui_volume_name_label = ui.label(
-                        f"Volume: {dataset[volume_index].filename}"
-                    ).classes("w-full text-center")
-                    ui_origin_label = ui.markdown(
-                        f"Origin: ({dataset[volume_index].slicer.origin[2]:.0f}, {dataset[volume_index].slicer.origin[1]:.0f}, {dataset[volume_index].slicer.origin[0]:.0f})"
-                    ).classes("w-full text-center")
-                    ui_rotation_label = ui.markdown(
-                        f"Rotation: {np.round(dataset[volume_index].slicer.rot_vec, 2).tolist()}"
-                    ).classes("w-full text-center")
 
             ii = ui.interactive_image(
                 on_mouse=mouse_handler,
                 size=(canvas_size, canvas_size),
                 events=["mousedown", "mousemove", "mouseup"],
             )
-            ii.on("wheel", mouse_wheel_handler)
-
-            ui_button_predict = (
-                ui.button("Predict", on_click=predict_slice)
-                .props("filled")
-                .classes("w-full")
+            ii.on(
+                "wheel.prevent.stop",
+                mouse_wheel_handler,
             )
+
+            # ─── Button row: Predict and Save Annotation ───
+            with ui.row().classes("w-full gap-4 justify-center flex-nowrap"):
+
+                ui_button_save = (
+                    ui.button("Save Annotation", on_click=save_annotation)
+                    .props("filled")
+                    .classes("w-1/2 py-2")
+                )
+
+                ui_button_predict = (
+                    ui.button("Predict", on_click=predict_slice)
+                    .props("filled")
+                    .classes("w-[50%]  py-2")
+                )
 
         with ui.column().classes("w-1/4"):
 
@@ -1333,6 +1474,7 @@ randomize()
 # ui.run(host='0.0.0.0', port=9546, show=False, reload=False)
 # ui.run(reload=True)
 # ui.run(port=9546, on_air=True)
+
 ui.run(
     port=9546,
     uvicorn_reload_dirs="interactive_unet",
