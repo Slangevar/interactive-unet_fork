@@ -472,8 +472,8 @@ def key_handler(e: KeyEventArguments):
     if e.action.keydown and not e.action.repeat:
 
         # Random slice
-        if e.key == "Space":
-            randomize()
+        # if e.key == "Space":
+        #     randomize()
 
         # Next slice in stack
         if e.key == "q":

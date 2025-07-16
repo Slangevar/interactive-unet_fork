@@ -27,7 +27,6 @@ Using the paint tool annotate at least one image and then train a model. Repeat 
 - **Ctrl + S**: Save sample
 - **Q**: Next slice in stack
 - **A**: Previous slice in stack
-- **Spacebar**: Random slice
 - **C**: Cycles through additional colors. Now also allows for switching to the background color (red).
 - **D**: Toggle prediction overlay
 - **F**: Cycle between overlay types
